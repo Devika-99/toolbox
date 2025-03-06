@@ -1,0 +1,124 @@
+clc;
+clear;
+close all;
+
+% Define the 2R robot using DH parameters
+L1 = Link('d', 0, 'a', 1, 'alpha', 0, 'm', 1, 'r', [0.5, 0, 0], 'I', [0.1, 0.1, 0.1], 'Jm', 0.01);
+L2 = Link('d', 0, 'a', 1, 'alpha', 0, 'm', 1, 'r', [0.5, 0, 0], 'I', [0.1, 0.1, 0.1], 'Jm', 0.01);
+robot = SerialLink([L1 L2], 'name', '2R Robot');
+
+% Define time parameters
+dt = 0.05;         % Time step size
+steps = 500;       % Number of steps
+
+% Define the circular trajectory parameters
+center_x = 1;       % X-coordinate of the circle center
+center_y = 1;       % Y-coordinate of the circle center
+radius = 0.5;       % Radius of the circle
+
+% Generate the desired circular trajectory
+theta = linspace(0, 2 * pi, steps);  % Angle for the circle
+x_d = center_x + radius * cos(theta); % X-coordinates of the circle
+y_d = center_y + radius * sin(theta); % Y-coordinates of the circle
+
+% Compute desired velocities and accelerations
+x_dot_d = gradient(x_d, dt);                
+y_dot_d = gradient(y_d, dt);                
+x_ddot_d = gradient(x_dot_d, dt);           
+y_ddot_d = gradient(y_dot_d, dt);           
+
+% Initialize variables
+q = [0; 0];             % Initial guess for joint angles
+q_dot = [0; 0];         % Initial joint velocities
+q_ddot = [0; 0];        % Initial joint acceleration
+Kp = 15;                % Proportional gain
+Kd = 4;                 % Derivative gain
+max_q_dot = 1;          % Limit on joint velocities
+max_q_ddot = 5;         % Limit on joint accelerations
+
+trajectory = zeros(steps, 2);          % To record end-effector position
+end_effector_vel = zeros(steps, 2);   % To record end-effector velocity
+end_effector_acc = zeros(steps, 2);   % To record end-effector acceleration
+
+% Errors
+position_errors = zeros(steps, 2);    % Position errors
+velocity_errors = zeros(steps, 2);    % Velocity errors
+acceleration_errors = zeros(steps, 2); % Acceleration errors
+
+% Symbolic Jacobian and Jacobian Derivative computation
+syms q1 q2 q1_dot q2_dot real
+q_sym = [q1; q2];
+q_dot_sym = [q1_dot; q2_dot];
+
+% Define forward kinematics symbolically
+x_end = cos(q1) + cos(q1 + q2);
+y_end = sin(q1) + sin(q1 + q2);
+pos_end = [x_end; y_end];
+
+% Compute the Jacobian and its time derivative symbolically
+J_sym = jacobian(pos_end, q_sym);
+J_dot_sym = diff(J_sym, q1) * q1_dot + diff(J_sym, q2) * q2_dot;
+
+% Convert symbolic expressions to MATLAB function handles
+J_func = matlabFunction(J_sym, 'Vars', {q_sym});
+J_dot_func = matlabFunction(J_dot_sym, 'Vars', {q_sym, q_dot_sym});
+
+% Main control loop
+for i = 1:steps
+    % Current joint angles and velocities
+    q1_val = q(1);
+    q2_val = q(2);
+    q1_dot_val = q_dot(1);
+    q2_dot_val = q_dot(2);
+
+    % Evaluate Jacobian and Jacobian derivative numerically
+    J = J_func([q1_val; q2_val]);
+    J_dot = J_dot_func([q1_val; q2_val], [q1_dot_val; q2_dot_val]);
+
+    % Current end-effector position using forward kinematics
+    x_observed = cos(q1_val) + cos(q1_val + q2_val);
+    y_observed = sin(q1_val) + sin(q1_val + q2_val);
+    trajectory(i, :) = [x_observed, y_observed];  % Record end-effector position
+
+    % End-effector velocity
+    end_effector_vel(i, :) = (J * q_dot)';        % Record end-effector velocity
+
+    % End-effector acceleration
+    end_effector_acc(i, :) = (J * q_ddot + J_dot * q_dot)'; % Record end-effector acceleration
+
+    % Compute position, velocity, and acceleration errors
+    position_errors(i, :) = [x_d(i) - x_observed, y_d(i) - y_observed];
+    velocity_errors(i, :) = [x_dot_d(i) - end_effector_vel(i, 1), y_dot_d(i) - end_effector_vel(i, 2)];
+    acceleration_errors(i, :) = [x_ddot_d(i) - end_effector_acc(i, 1), y_ddot_d(i) - end_effector_acc(i, 2)];
+
+    % Compute Joint Acceleration using PD Control Law
+    e = position_errors(i, :)';
+    e_dot = velocity_errors(i, :)';
+
+    q_ddot = pinv(J) * (Kp * e + Kd * e_dot + [x_ddot_d(i); y_ddot_d(i)] - J_dot * q_dot);
+
+    % Limit joint accelerations
+    if norm(q_ddot) > max_q_ddot
+        q_ddot = max_q_ddot * q_ddot / norm(q_ddot);
+    end
+
+    % Update joint velocities using acceleration
+    q_dot = q_dot + dt * q_ddot;
+
+    % Limit joint velocities
+    if norm(q_dot) > max_q_dot
+        q_dot = max_q_dot * q_dot / norm(q_dot);
+    end
+
+    % Update joint positions using velocity
+    q = q + dt * q_dot;
+
+    % Plot the robot and trajectory in real-time
+    robot.plot(q');
+    hold on;
+    plot(trajectory(1:i,1), trajectory(1:i,2), 'r');  % Actual trajectory
+    plot(x_d, y_d, 'b--');                            % Desired trajectory
+    drawnow;
+end
+
+
